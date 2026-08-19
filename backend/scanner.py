@@ -1,114 +1,96 @@
-import MetaTrader5 as mt5
+import os
+import requests
 import pandas as pd
 import numpy as np
 
+BASE_URL = "https://api.twelvedata.com/time_series"
 
-# =========================
-# SETTINGS
-# =========================
+API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
-TIMEFRAME = mt5.TIMEFRAME_H1
+TIMEFRAME = "1h"
 CANDLE_COUNT = 200
 
 MIN_SCORE = 70
 
-# Pair utama yang ingin kita cari.
-# Scanner akan mencocokkan dengan simbol
-# yang benar-benar tersedia di MT5.
 FOREX_PAIRS = [
-    "EURUSD",
-    "GBPUSD",
-    "USDJPY",
-    "USDCHF",
-    "AUDUSD",
-    "USDCAD",
-    "NZDUSD",
-    "EURGBP",
-    "EURJPY",
-    "GBPJPY",
+    "EUR/USD",
+    "GBP/USD",
+    "USD/JPY",
+    "USD/CHF",
+    "AUD/USD",
+    "USD/CAD",
+    "NZD/USD",
+    "EUR/GBP",
+    "EUR/JPY",
+    "GBP/JPY",
 ]
 
 
 # =========================
-# MT5 CONNECTION
-# =========================
-
-def connect_mt5():
-
-    if not mt5.initialize():
-
-        raise RuntimeError(
-            f"MT5 initialization failed: {mt5.last_error()}"
-        )
-
-    return True
-
-
-# =========================
-# FIND BROKER SYMBOL
-# =========================
-
-def find_symbol(base_symbol):
-
-    symbols = mt5.symbols_get()
-
-    if symbols is None:
-        return None
-
-    base_symbol = base_symbol.upper()
-
-    # Exact match terlebih dahulu
-    for symbol in symbols:
-
-        if symbol.name.upper() == base_symbol:
-            return symbol.name
-
-    # Kalau broker memakai suffix/prefix
-    for symbol in symbols:
-
-        name = symbol.name.upper()
-
-        if base_symbol in name:
-
-            # Hindari simbol aneh yang kebetulan
-            # mengandung nama pair
-            if (
-                len(name) <= len(base_symbol) + 8
-            ):
-                return symbol.name
-
-    return None
-
-
-# =========================
-# GET CANDLES
+# GET MARKET DATA
 # =========================
 
 def get_candles(symbol):
 
-    rates = mt5.copy_rates_from_pos(
-        symbol,
-        TIMEFRAME,
-        0,
-        CANDLE_COUNT
+    if not API_KEY:
+        raise RuntimeError(
+            "TWELVE_DATA_API_KEY belum diset."
+        )
+
+    params = {
+        "symbol": symbol,
+        "interval": TIMEFRAME,
+        "outputsize": CANDLE_COUNT,
+        "apikey": API_KEY,
+        "timezone": "UTC"
+    }
+
+    response = requests.get(
+        BASE_URL,
+        params=params,
+        timeout=15
     )
 
-    if rates is None:
+    response.raise_for_status()
+
+    data = response.json()
+
+    if data.get("status") == "error":
+        raise RuntimeError(
+            data.get(
+                "message",
+                "Twelve Data API error"
+            )
+        )
+
+    values = data.get("values")
+
+    if not values:
         return None
 
-    if len(rates) < 100:
-        return None
+    df = pd.DataFrame(values)
 
-    df = pd.DataFrame(rates)
+    for column in [
+        "open",
+        "high",
+        "low",
+        "close"
+    ]:
 
-    df["time"] = pd.to_datetime(
-        df["time"],
-        unit="s"
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        )
+
+    df["datetime"] = pd.to_datetime(
+        df["datetime"]
     )
 
-    # Candle 0 adalah candle berjalan.
-    # Kita tidak gunakan candle tersebut.
-    df = df.iloc[:-1].copy()
+    df = df.sort_values(
+        "datetime"
+    ).reset_index(
+        drop=True
+    )
 
     return df
 
@@ -143,15 +125,32 @@ def calculate_indicators(df):
     # RSI
     delta = close.diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain = delta.clip(
+        lower=0
+    )
 
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
+    loss = -delta.clip(
+        upper=0
+    )
 
-    rs = avg_gain / avg_loss.replace(
-        0,
-        np.nan
+    avg_gain = (
+        gain
+        .rolling(14)
+        .mean()
+    )
+
+    avg_loss = (
+        loss
+        .rolling(14)
+        .mean()
+    )
+
+    rs = (
+        avg_gain /
+        avg_loss.replace(
+            0,
+            np.nan
+        )
     )
 
     df["rsi"] = (
@@ -210,373 +209,407 @@ def calculate_indicators(df):
 
 
 # =========================
-# ANALYZE
+# ANALYZE ONE PAIR
 # =========================
 
 def analyze(symbol):
 
-    df = get_candles(symbol)
+    try:
 
-    if df is None:
-        return None
+        df = get_candles(symbol)
 
-    df = calculate_indicators(df)
+        if df is None:
+            return None
 
-    last = df.iloc[-1]
-    previous = df.iloc[-2]
+        if len(df) < 60:
+            return None
 
-    price = float(last["close"])
+        # Buang candle terakhir karena
+        # bisa masih berjalan.
+        df = df.iloc[:-1].copy()
 
-    ema20 = float(last["ema20"])
-    ema50 = float(last["ema50"])
+        df = calculate_indicators(df)
 
-    previous_ema20 = float(
-        previous["ema20"]
-    )
+        last = df.iloc[-1]
+        previous = df.iloc[-2]
 
-    previous_ema50 = float(
-        previous["ema50"]
-    )
+        price = float(last["close"])
 
-    rsi = float(last["rsi"])
-    atr = float(last["atr"])
-
-    support = float(
-        last["support"]
-    )
-
-    resistance = float(
-        last["resistance"]
-    )
-
-    if np.isnan(rsi) or np.isnan(atr):
-        return None
-
-    # =========================
-    # SCORE
-    # =========================
-
-    buy_score = 0
-    sell_score = 0
-
-    buy_reasons = []
-    sell_reasons = []
-
-    # -------------------------
-    # TREND
-    # -------------------------
-
-    bullish = (
-        ema20 > ema50
-        and price > ema50
-    )
-
-    bearish = (
-        ema20 < ema50
-        and price < ema50
-    )
-
-    if bullish:
-
-        buy_score += 25
-
-        buy_reasons.append(
-            "Bullish trend"
+        ema20 = float(
+            last["ema20"]
         )
 
-    if bearish:
-
-        sell_score += 25
-
-        sell_reasons.append(
-            "Bearish trend"
+        ema50 = float(
+            last["ema50"]
         )
 
-    # -------------------------
-    # PRICE / EMA20
-    # -------------------------
-
-    if price > ema20:
-
-        buy_score += 15
-
-        buy_reasons.append(
-            "Price above EMA20"
+        previous_ema20 = float(
+            previous["ema20"]
         )
 
-    if price < ema20:
-
-        sell_score += 15
-
-        sell_reasons.append(
-            "Price below EMA20"
+        previous_ema50 = float(
+            previous["ema50"]
         )
 
-    # -------------------------
-    # EMA CROSS
-    # -------------------------
-
-    bullish_cross = (
-        ema20 > ema50
-        and previous_ema20 <= previous_ema50
-    )
-
-    bearish_cross = (
-        ema20 < ema50
-        and previous_ema20 >= previous_ema50
-    )
-
-    if bullish_cross:
-
-        buy_score += 15
-
-        buy_reasons.append(
-            "Bullish EMA cross"
+        rsi = float(
+            last["rsi"]
         )
 
-    if bearish_cross:
-
-        sell_score += 15
-
-        sell_reasons.append(
-            "Bearish EMA cross"
+        atr = float(
+            last["atr"]
         )
 
-    # -------------------------
-    # RSI
-    # -------------------------
-
-    if 50 <= rsi <= 68:
-
-        buy_score += 20
-
-        buy_reasons.append(
-            "RSI bullish zone"
+        support = float(
+            last["support"]
         )
 
-    if 32 <= rsi <= 50:
-
-        sell_score += 20
-
-        sell_reasons.append(
-            "RSI bearish zone"
+        resistance = float(
+            last["resistance"]
         )
 
-    # Hindari entry saat terlalu ekstrem
-    if rsi > 70:
+        if (
+            np.isnan(rsi)
+            or np.isnan(atr)
+        ):
+            return None
 
-        buy_score -= 20
+        # =====================
+        # SCORE
+        # =====================
 
-    if rsi < 30:
+        buy_score = 0
+        sell_score = 0
 
-        sell_score -= 20
+        buy_reasons = []
+        sell_reasons = []
 
-    # -------------------------
-    # SUPPORT / RESISTANCE
-    # -------------------------
+        # ---------------------
+        # TREND
+        # ---------------------
 
-    support_distance = (
-        price - support
-    )
-
-    resistance_distance = (
-        resistance - price
-    )
-
-    # BUY lebih menarik jika harga
-    # relatif dekat support.
-    if (
-        support_distance > 0
-        and support_distance <= atr * 1.5
-    ):
-
-        buy_score += 10
-
-        buy_reasons.append(
-            "Near support"
+        bullish = (
+            ema20 > ema50
+            and price > ema50
         )
 
-    # SELL lebih menarik jika harga
-    # relatif dekat resistance.
-    if (
-        resistance_distance > 0
-        and resistance_distance <= atr * 1.5
-    ):
-
-        sell_score += 10
-
-        sell_reasons.append(
-            "Near resistance"
+        bearish = (
+            ema20 < ema50
+            and price < ema50
         )
 
-    # =========================
-    # FINAL SIGNAL
-    # =========================
+        if bullish:
 
-    signal = "WAIT"
+            buy_score += 25
 
-    entry = price
-    sl = None
-    tp1 = None
-    tp2 = None
+            buy_reasons.append(
+                "Bullish trend"
+            )
 
-    reasons = []
+        if bearish:
 
-    score = max(
-        buy_score,
-        sell_score
-    )
+            sell_score += 25
 
-    if (
-        buy_score >= MIN_SCORE
-        and buy_score > sell_score
-    ):
+            sell_reasons.append(
+                "Bearish trend"
+            )
 
-        signal = "BUY"
+        # ---------------------
+        # EMA20
+        # ---------------------
+
+        if price > ema20:
+
+            buy_score += 15
+
+            buy_reasons.append(
+                "Price above EMA20"
+            )
+
+        if price < ema20:
+
+            sell_score += 15
+
+            sell_reasons.append(
+                "Price below EMA20"
+            )
+
+        # ---------------------
+        # EMA CROSS
+        # ---------------------
+
+        bullish_cross = (
+            ema20 > ema50
+            and
+            previous_ema20
+            <= previous_ema50
+        )
+
+        bearish_cross = (
+            ema20 < ema50
+            and
+            previous_ema20
+            >= previous_ema50
+        )
+
+        if bullish_cross:
+
+            buy_score += 15
+
+            buy_reasons.append(
+                "Bullish EMA cross"
+            )
+
+        if bearish_cross:
+
+            sell_score += 15
+
+            sell_reasons.append(
+                "Bearish EMA cross"
+            )
+
+        # ---------------------
+        # RSI
+        # ---------------------
+
+        if 50 <= rsi <= 68:
+
+            buy_score += 20
+
+            buy_reasons.append(
+                "RSI bullish zone"
+            )
+
+        if 32 <= rsi <= 50:
+
+            sell_score += 20
+
+            sell_reasons.append(
+                "RSI bearish zone"
+            )
+
+        # Jangan entry kondisi ekstrem
+        if rsi > 70:
+
+            buy_score -= 20
+
+        if rsi < 30:
+
+            sell_score -= 20
+
+        # ---------------------
+        # SUPPORT
+        # ---------------------
+
+        support_distance = (
+            price - support
+        )
+
+        if (
+            support_distance > 0
+            and
+            support_distance
+            <= atr * 1.5
+        ):
+
+            buy_score += 10
+
+            buy_reasons.append(
+                "Near support"
+            )
+
+        # ---------------------
+        # RESISTANCE
+        # ---------------------
+
+        resistance_distance = (
+            resistance - price
+        )
+
+        if (
+            resistance_distance > 0
+            and
+            resistance_distance
+            <= atr * 1.5
+        ):
+
+            sell_score += 10
+
+            sell_reasons.append(
+                "Near resistance"
+            )
+
+        # =====================
+        # FINAL SIGNAL
+        # =====================
+
+        signal = "WAIT"
 
         entry = price
 
-        sl = price - (
-            atr * 1.5
+        sl = None
+        tp1 = None
+        tp2 = None
+
+        reasons = []
+
+        score = max(
+            buy_score,
+            sell_score
         )
 
-        risk = entry - sl
+        # BUY
+        if (
+            buy_score >= MIN_SCORE
+            and
+            buy_score > sell_score
+        ):
 
-        tp1 = entry + (
-            risk * 1.5
-        )
+            signal = "BUY"
 
-        tp2 = entry + (
-            risk * 2.5
-        )
+            entry = price
 
-        reasons = buy_reasons
+            sl = (
+                entry -
+                (atr * 1.5)
+            )
 
-    elif (
-        sell_score >= MIN_SCORE
-        and sell_score > buy_score
-    ):
+            risk = (
+                entry - sl
+            )
 
-        signal = "SELL"
+            tp1 = (
+                entry +
+                (risk * 1.5)
+            )
 
-        entry = price
+            tp2 = (
+                entry +
+                (risk * 2.5)
+            )
 
-        sl = price + (
-            atr * 1.5
-        )
+            reasons = buy_reasons
 
-        risk = sl - entry
+        # SELL
+        elif (
+            sell_score >= MIN_SCORE
+            and
+            sell_score > buy_score
+        ):
 
-        tp1 = entry - (
-            risk * 1.5
-        )
+            signal = "SELL"
 
-        tp2 = entry - (
-            risk * 2.5
-        )
+            entry = price
 
-        reasons = sell_reasons
+            sl = (
+                entry +
+                (atr * 1.5)
+            )
 
-    return {
-        "symbol": symbol,
-        "signal": signal,
-        "score": int(score),
+            risk = (
+                sl - entry
+            )
 
-        "price": round(
-            price,
-            6
-        ),
+            tp1 = (
+                entry -
+                (risk * 1.5)
+            )
 
-        "entry": round(
-            entry,
-            6
-        ),
+            tp2 = (
+                entry -
+                (risk * 2.5)
+            )
 
-        "sl": (
-            round(sl, 6)
-            if sl is not None
-            else None
-        ),
+            reasons = sell_reasons
 
-        "tp1": (
-            round(tp1, 6)
-            if tp1 is not None
-            else None
-        ),
+        return {
+            "symbol": symbol,
+            "signal": signal,
+            "score": int(score),
 
-        "tp2": (
-            round(tp2, 6)
-            if tp2 is not None
-            else None
-        ),
+            "price": round(
+                price,
+                6
+            ),
 
-        "rsi": round(
-            rsi,
-            2
-        ),
+            "entry": round(
+                entry,
+                6
+            ),
 
-        "atr": round(
-            atr,
-            6
-        ),
+            "sl": (
+                round(sl, 6)
+                if sl is not None
+                else None
+            ),
 
-        "support": round(
-            support,
-            6
-        ),
+            "tp1": (
+                round(tp1, 6)
+                if tp1 is not None
+                else None
+            ),
 
-        "resistance": round(
-            resistance,
-            6
-        ),
+            "tp2": (
+                round(tp2, 6)
+                if tp2 is not None
+                else None
+            ),
 
-        "reasons": reasons
-    }
+            "rsi": round(
+                rsi,
+                2
+            ),
+
+            "atr": round(
+                atr,
+                6
+            ),
+
+            "support": round(
+                support,
+                6
+            ),
+
+            "resistance": round(
+                resistance,
+                6
+            ),
+
+            "reasons": reasons
+        }
+
+    except Exception as e:
+
+        return {
+            "symbol": symbol,
+            "signal": "ERROR",
+            "score": 0,
+            "error": str(e)
+        }
 
 
 # =========================
-# SCAN MARKET
+# SCAN ALL FOREX
 # =========================
 
 def scan():
 
-    connect_mt5()
-
     results = []
 
-    try:
+    for symbol in FOREX_PAIRS:
 
-        for base_pair in FOREX_PAIRS:
-
-            symbol = find_symbol(
-                base_pair
-            )
-
-            if symbol is None:
-                continue
-
-            # Pastikan simbol tersedia
-            # untuk digunakan.
-            mt5.symbol_select(
-                symbol,
-                True
-            )
-
-            result = analyze(
-                symbol
-            )
-
-            if result is not None:
-                results.append(result)
-
-        # Ranking terbaik
-        results.sort(
-            key=lambda x: x["score"],
-            reverse=True
+        result = analyze(
+            symbol
         )
 
-        return results
+        if result is not None:
 
-    finally:
+            results.append(
+                result
+            )
 
-        mt5.shutdown()
+    results.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    return results
