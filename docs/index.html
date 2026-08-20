@@ -1,1 +1,142 @@
+<!DOCTYPE html>
+<html>
 
+<head>
+
+    <meta charset="UTF-8">
+
+    <title>Trading Scanner</title>
+
+    <style>
+
+        body {
+            font-family: Arial;
+            background: #111;
+            color: white;
+            padding: 20px;
+        }
+
+        button {
+            padding: 12px 20px;
+            cursor: pointer;
+        }
+
+        .card {
+            background: #1d1d1d;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 10px;
+        }
+
+        .buy {
+            color: #00ff88;
+        }
+
+        .sell {
+            color: #ff5555;
+        }
+
+        .wait {
+            color: #aaa;
+        }
+
+    </style>
+
+</head>
+
+<body>
+
+<h1>🔥 Trading Scanner</h1>
+
+<button onclick="scan()">SCAN MARKET</button>
+
+<div id="status"></div>
+
+<div id="results"></div>
+
+
+<script>
+
+async function scan() {
+
+    document.getElementById("status").innerText =
+        "Scanning market...";
+
+    const response =
+        await fetch("/api/scan");
+
+    const data =
+        await response.json();
+
+    let html = "";
+
+    data.results
+        .filter(x => x.direction !== "WAIT")
+        .slice(0, 10)
+        .forEach((x, index) => {
+
+            let cls =
+                x.direction.toLowerCase();
+
+            html += `
+
+                <div class="card">
+
+                    <h2>
+                        #${index + 1}
+                        ${x.symbol}
+                    </h2>
+
+                    <h3 class="${cls}">
+                        ${x.direction}
+                        — ${x.score}/100
+                    </h3>
+
+                    <p>
+                        Price:
+                        ${x.price}
+                    </p>
+
+                    <p>
+                        Entry:
+                        ${x.entry}
+                    </p>
+
+                    <p>
+                        SL:
+                        ${x.sl}
+                    </p>
+
+                    <p>
+                        TP:
+                        ${x.tp}
+                    </p>
+
+                    <p>
+                        RSI:
+                        ${x.rsi}
+                    </p>
+
+                    <p>
+                        ${x.reasons.join("<br>")}
+                    </p>
+
+                </div>
+
+            `;
+
+        });
+
+    document.getElementById("results")
+        .innerHTML = html;
+
+    document.getElementById("status").innerText =
+        `Found ${data.count} markets`;
+
+}
+
+</script>
+
+</body>
+
+</html>
